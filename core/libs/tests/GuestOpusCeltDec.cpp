@@ -46,7 +46,7 @@ const std::uint8_t CELT_MONO[4][20] = {
     {0xD0, 0x7F, 0xDE, 0x50, 0xEF, 0x65, 0x1A, 0x62, 0x45, 0x17, 0x30, 0x1E, 0x30, 0x4F, 0x85, 0x89, 0x02, 0x4F, 0x4E, 0xEB},
 };
 
-void RequireTone(const std::int16_t* pcm, int samples, int channels) {
+void RequireTone(const std::int16_t* pcm, int samples, int channels, int rate) {
     for (int channel = 0; channel < channels; ++channel) {
         int peak = 0, crossings = 0;
         for (int sample = 0; sample < samples; ++sample) {
@@ -55,7 +55,8 @@ void RequireTone(const std::int16_t* pcm, int samples, int channels) {
             if (sample > 0 && (value < 0) != (pcm[(sample - 1) * channels + channel] < 0)) ++crossings;
         }
         Require(peak > 100 && peak < 200);
-        Require(crossings >= samples / 24 - 4 && crossings <= samples / 24 + 4);
+        const int expected = samples * 2000 / rate;
+        Require(crossings >= expected - 4 && crossings <= expected + 4);
     }
 }
 
@@ -69,7 +70,7 @@ int main() {
     Require(sceOpusCeltDecGetSize(1) == 640 && sceOpusCeltDecGetSize(2) == 640);
     RequireThrows([&] { sceOpusCeltDecGetSize(3); });
     std::array<std::uint8_t, 640> state{}, otherState{}, monoState{}, unsupported{};
-    for (int rate : {8000, 12000, 16000, 24000})
+    for (int rate : {0, 22050, 44100, 96000})
         RequireThrows([&] { sceOpusCeltDecCreateEx(&context, unsupported.data(), rate, 2); });
     Require(sceOpusCeltDecCreateEx(&context, state.data(), 48000, 2) == 0);
     Require(sceOpusCeltDecCreateEx(&otherContext, otherState.data(), 48000, 2) == 0);
@@ -92,7 +93,7 @@ int main() {
         Require(pcm.front() == 12345 && pcm.back() == 12345);
         Require(sceOpusCeltDecDecode(otherState.data(), CELT_STEREO[frame], 60, reference.data() + 1, 3840) == 3840);
         Require(std::equal(pcm.begin() + 1, pcm.end() - 1, reference.begin() + 1));
-        if (frame == 1 || frame == 2) RequireTone(pcm.data() + 1, 960, 2);
+        if (frame == 1 || frame == 2) RequireTone(pcm.data() + 1, 960, 2, 48000);
     }
 
     std::array<std::int16_t, 482> mono{};
@@ -100,7 +101,22 @@ int main() {
         mono.fill(12345);
         Require(sceOpusCeltDecDecode(monoState.data(), CELT_MONO[frame], 20, mono.data() + 1, 960) == 960);
         Require(mono.front() == 12345 && mono.back() == 12345);
-        if (frame == 1 || frame == 2) RequireTone(mono.data() + 1, 480, 1);
+        if (frame == 1 || frame == 2) RequireTone(mono.data() + 1, 480, 1, 48000);
+    }
+
+    for (int rate : {8000, 12000, 16000, 24000}) {
+        std::array<std::uint8_t, 640> rateState{};
+        Require(sceOpusCeltDecCreateEx(&context, rateState.data(), rate, 2) == 0);
+        const int samples = 960 * rate / 48000;
+        std::array<std::int16_t, 962> resampled{};
+        for (int frame = 0; frame < 4; ++frame) {
+            resampled.fill(12345);
+            RequireThrows([&] { sceOpusCeltDecDecode(rateState.data(), CELT_STEREO[frame], 60, resampled.data() + 1, samples * 4 - 1); });
+            Require(sceOpusCeltDecDecode(rateState.data(), CELT_STEREO[frame], 60, resampled.data() + 1, samples * 4) == samples * 4);
+            Require(resampled[0] == 12345 && resampled[samples * 2 + 1] == 12345);
+            if (frame == 1 || frame == 2) RequireTone(resampled.data() + 1, samples, 2, rate);
+        }
+        Require(sceOpusCeltDecDestroy(rateState.data()) == 0);
     }
 
     Require(sceOpusCeltDecDestroy(state.data()) == 0);
